@@ -17,11 +17,11 @@ llm = ChatOllama(model="llama3.2")
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
 
 # File uploader in Streamlit sidebar
-uploaded_file = st.sidebar.file_uploader("Upload a .txt or .pdf file", type=["txt", "pdf"])
+uploaded_file = st.sidebar.file_uploader("Upload a .txt or .pdf file", type=["txt", "md", "pdf"])
 
 if uploaded_file:
     # Save file temporarily
-    file_path = os.path.join(".", uploaded_file.name)
+    file_path = os.path.join("./tmp", uploaded_file.name)
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
