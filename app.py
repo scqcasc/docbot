@@ -10,6 +10,9 @@ from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 
+# --- Page Configuration (Must be the first Streamlit command) ---
+st.set_page_config(page_title="Local Document RAG Chatbot", layout="wide")
+
 def get_vram_usage():
     """Queries rocm-smi via JSON output to pull precise VRAM analytics."""
     try:
@@ -66,21 +69,34 @@ st.sidebar.progress(vram_percentage)
 if st.sidebar.button("🔄 Refresh VRAM Stats"):
     st.rerun()
 
-st.set_page_config(page_title="Local Document RAG Chatbot", layout="wide")
+st.sidebar.markdown("---")
+
+# Default system prompt string
+default_system_prompt = (
+    "You are an assistant for question-answering tasks. Use the following pieces of retrieved context "
+    "to answer the question. If you don't know the answer, just say that you don't know.\n\n"
+    "Context:\n{context}"
+)
+
+# System prompt control widget
+system_prompt = st.sidebar.text_area(
+    label="⚙️ System Prompt",
+    value=default_system_prompt,
+    height=180,
+    help="Modify how the model handles retrieved documents. Keep the {context} placeholder intact."
+)
+
 st.title("🤖 Local Document Chatbot (LCEL)")
 
 # Initialize Ollama local model and embeddings
-# Ensure you have run: ollama pull llama3.2
 llm = ChatOllama(model="llama3.2")
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
 
 # File uploader in Streamlit sidebar
-uploaded_file = st.sidebar.file_uploader("Upload a .txt, .md,  or .pdf file", type=["txt", "md", "pdf"])
+uploaded_file = st.sidebar.file_uploader("Upload a .txt, .md, or .pdf file", type=["txt", "md", "pdf"])
 
 if uploaded_file:
     # Save file temporarily
-
-    # make sure there is a tmp dir
     if not os.path.isdir("./tmp"):
         os.mkdir("./tmp")
         
@@ -102,12 +118,7 @@ if uploaded_file:
     vectorstore = FAISS.from_documents(splits, embeddings)
     retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
-    # Setup RAG chain using Modern LCEL
-    system_prompt = (
-        "You are an assistant for question-answering tasks. Use the following pieces of retrieved context "
-        "to answer the question. If you don't know the answer, just say that you don't know.\n\n"
-        "Context:\n{context}"
-    )
+    # Prompt Template updated dynamically from the user input
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human", "{input}"),
