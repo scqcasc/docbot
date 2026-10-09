@@ -1,3 +1,5 @@
-* add a login function with roles
-* add a session cache
-* add a history
+[x] add general chat ability
+[ ] add system mem monitor when not using GPU
+[ ] add a login function with roles
+[ ] add a session cache
+[ ] add a history
