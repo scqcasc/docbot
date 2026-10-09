@@ -8,7 +8,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 
 # Optional import of ollama SDK
@@ -106,7 +106,7 @@ if st.sidebar.button("🔄 Refresh VRAM Stats"):
 st.sidebar.markdown("---")
 
 # File uploader in Streamlit sidebar
-uploaded_file = st.sidebar.file_uploader("Upload a .txt, .md, or .pdf file (Optional)", type=["txt", "md", "pdf"])
+uploaded_file = st.sidebar.file_uploader("Upload a .txt, .md, .py, or .pdf file (Optional)", type=["txt", "py", "md", "pdf"])
 
 # Define default prompts depending on mode
 if uploaded_file:
@@ -146,7 +146,10 @@ for message in st.session_state.messages:
         st.write(message["content"])
 
 # Explicitly instantiate the Chat LLM and Embedding models separately
-chat_llm = ChatOllama(model=selected_model)
+chat_llm = ChatOllama(
+                  model=selected_model,
+                  num_ctx=8192
+              )
 embeddings_model = OllamaEmbeddings(model="nomic-embed-text")
 
 # --- RAG Branch: Process Document if Uploaded ---
@@ -154,7 +157,18 @@ retriever = None
 if uploaded_file:
     if not os.path.isdir("./tmp"):
         os.mkdir("./tmp")
-        
+
+    if uploaded_file.name.endswith(".py"):
+        text_splitter = RecursiveCharacterTextSplitter.from_language(
+            language=Language.PYTHON, 
+            chunk_size=2000, 
+            chunk_overlap=200
+        )
+    else:
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=2000, 
+            chunk_overlap=200
+        )
     file_path = os.path.join("./tmp", uploaded_file.name)
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
@@ -165,11 +179,11 @@ if uploaded_file:
         loader = TextLoader(file_path)
     
     docs = loader.load()
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    # text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     splits = text_splitter.split_documents(docs)
 
     vectorstore = FAISS.from_documents(splits, embeddings_model)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
 
     if os.path.exists(file_path):
         os.remove(file_path)
