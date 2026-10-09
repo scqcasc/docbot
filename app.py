@@ -8,20 +8,23 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter, Language
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 
-# Optional import of ollama SDK
-try:
-    import ollama
-except ImportError:
-    ollama = None
-
-# --- Page Configuration (Must be the first Streamlit command) ---
+# --- Page Configuration ---
 st.set_page_config(page_title="Local Chatbot", layout="wide")
 
+# Initialize Session State Variables at Top Level
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "total_tokens" not in st.session_state:
+    st.session_state.total_tokens = 0
+if "last_prompt_tokens" not in st.session_state:
+    st.session_state.last_prompt_tokens = 0
+if "last_completion_tokens" not in st.session_state:
+    st.session_state.last_completion_tokens = 0
+
 def get_vram_usage():
-    """Queries rocm-smi via JSON output to pull precise VRAM analytics."""
     try:
         result = subprocess.run(
             ["rocm-smi", "--showmeminfo", "vram", "--json"], 
@@ -30,59 +33,33 @@ def get_vram_usage():
             check=True
         )
         data = json.loads(result.stdout)
-        
         device_key = list(data.keys())[0] 
         vram_used = int(data[device_key]["VRAM Total Memory Used (B)"])
         vram_total = int(data[device_key]["VRAM Total Memory Total (B)"])
-        
-        used_gb = vram_used / (1024 ** 3)
-        total_gb = vram_total / (1024 ** 3)
-        
-        return used_gb, total_gb
+        return vram_used / (1024 ** 3), vram_total / (1024 ** 3)
     except Exception:
-        try:
-            result = subprocess.run(["rocm-smi", "--showmeminfo", "vram"], capture_output=True, text=True)
-            lines = result.stdout.split("\n")
-            used = [line for line in lines if "used" in line.lower()][0].split()[-1]
-            total = [line for line in lines if "total" in line.lower()][0].split()[-1]
-            return float(used)/(1024**3), float(total)/(1024**3)
-        except Exception:
-            return 0.0, 8.0 # Safe default fallback
+        return 0.0, 8.0
 
 def get_installed_ollama_models():
-    """Fetches list of installed Ollama models, filtering out embed-only models."""
     models = []
-    if ollama:
-        try:
-            response = ollama.list()
-            model_list = response.get("models", []) if isinstance(response, dict) else response.models
-            models = [m.get("name", "") if isinstance(m, dict) else m.model for m in model_list]
-        except Exception:
-            pass
-
-    if not models:
-        try:
-            res = requests.get("http://localhost:11434/api/tags", timeout=3)
-            if res.status_code == 200:
-                data = res.json()
-                models = [m["name"] for m in data.get("models", [])]
-        except Exception:
-            pass
-
-    # Filter out known embedding models from the LLM chat dropdown
+    try:
+        res = requests.get("http://localhost:11434/api/tags", timeout=3)
+        if res.status_code == 200:
+            data = res.json()
+            models = [m["name"] for m in data.get("models", [])]
+    except Exception:
+        pass
     chat_models = [m for m in models if "embed" not in m.lower()]
     return chat_models if chat_models else ["llama3.2"]
 
-# --- Build the Streamlit Sidebar Widget ---
+# --- Sidebar UI ---
 st.sidebar.title("⚙️ LLM & System Settings")
 
-# LLM Selector Widget
 available_models = get_installed_ollama_models()
 selected_model = st.sidebar.selectbox(
     "🤖 Select Installed LLM",
     options=available_models,
-    index=0,
-    help="Select any Ollama chat model currently pulled on your system."
+    index=0
 )
 
 st.sidebar.markdown("---")
@@ -90,85 +67,50 @@ st.sidebar.title("📊 AMD GPU Monitor")
 
 used_vram, total_vram = get_vram_usage()
 vram_percentage = min(1.0, used_vram / total_vram)
-
 st.sidebar.metric(
     label="VRAM Allocation", 
     value=f"{used_vram:.2f} GB / {total_vram:.2f} GB",
-    delta=f"{(total_vram - used_vram):.2f} GB Free",
-    delta_color="normal" if vram_percentage < 0.85 else "inverse"
+    delta=f"{(total_vram - used_vram):.2f} GB Free"
 )
-
 st.sidebar.progress(vram_percentage)
 
-if st.sidebar.button("🔄 Refresh VRAM Stats"):
-    st.rerun()
+st.sidebar.markdown("---")
+st.sidebar.title("🔢 Token Analytics")
+st.sidebar.metric("Last Prompt Tokens", st.session_state.last_prompt_tokens)
+st.sidebar.metric("Last Completion Tokens", st.session_state.last_completion_tokens)
+st.sidebar.metric("Cumulative Tokens Used", st.session_state.total_tokens)
 
 st.sidebar.markdown("---")
 
-# File uploader in Streamlit sidebar
-uploaded_file = st.sidebar.file_uploader("Upload a .txt, .md, .py, or .pdf file (Optional)", type=["txt", "py", "md", "pdf"])
+uploaded_file = st.sidebar.file_uploader("Upload a .txt, .md, .py, or .pdf file", type=["txt", "py", "md", "pdf"])
 
-# Define default prompts depending on mode
 if uploaded_file:
     default_system_prompt = (
         "You are an assistant for question-answering tasks. Use the following pieces of retrieved context "
         "to answer the question. If you don't know the answer, just say that you don't know.\n\n"
         "Context:\n{context}"
     )
-    help_text = "Modify how the model handles retrieved documents. Keep the {context} placeholder intact."
 else:
     default_system_prompt = "You are a helpful, smart, and concise AI assistant."
-    help_text = "Modify how the model behaves during open-ended chat."
 
-# System prompt control widget
-system_prompt = st.sidebar.text_area(
-    label="💬 System Prompt",
-    value=default_system_prompt,
-    height=160,
-    help=help_text
-)
-
-# Chat history management
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+system_prompt = st.sidebar.text_area("💬 System Prompt", value=default_system_prompt, height=160)
 
 if st.sidebar.button("🗑️ Clear Chat History"):
     st.session_state.messages = []
+    st.session_state.total_tokens = 0
+    st.session_state.last_prompt_tokens = 0
+    st.session_state.last_completion_tokens = 0
     st.rerun()
 
-# --- Main Interface ---
-title_suffix = f" ({selected_model} - RAG)" if uploaded_file else f" ({selected_model} - Open Chat)"
-st.title(f"🤖 Local Chatbot{title_suffix}")
-
-# Display chat message history on rerun
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.write(message["content"])
-
-# Explicitly instantiate the Chat LLM and Embedding models separately
-chat_llm = ChatOllama(
-                  model=selected_model,
-                  num_ctx=8192
-              )
+# --- Model & Document Processing ---
+chat_llm = ChatOllama(model=selected_model, num_ctx=8192)
 embeddings_model = OllamaEmbeddings(model="nomic-embed-text")
 
-# --- RAG Branch: Process Document if Uploaded ---
 retriever = None
 if uploaded_file:
     if not os.path.isdir("./tmp"):
         os.mkdir("./tmp")
-
-    if uploaded_file.name.endswith(".py"):
-        text_splitter = RecursiveCharacterTextSplitter.from_language(
-            language=Language.PYTHON, 
-            chunk_size=2000, 
-            chunk_overlap=200
-        )
-    else:
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=2000, 
-            chunk_overlap=200
-        )
+        
     file_path = os.path.join("./tmp", uploaded_file.name)
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
@@ -179,14 +121,28 @@ if uploaded_file:
         loader = TextLoader(file_path)
     
     docs = loader.load()
-    # text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    splits = text_splitter.split_documents(docs)
 
+    if uploaded_file.name.endswith(".py"):
+        text_splitter = RecursiveCharacterTextSplitter.from_language(
+            language=Language.PYTHON, chunk_size=2000, chunk_overlap=200
+        )
+    else:
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
+
+    splits = text_splitter.split_documents(docs)
     vectorstore = FAISS.from_documents(splits, embeddings_model)
     retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
 
     if os.path.exists(file_path):
         os.remove(file_path)
+
+# --- Main Interface ---
+title_suffix = f" ({selected_model} - RAG)" if uploaded_file else f" ({selected_model} - Open Chat)"
+st.title(f"🤖 Local Chatbot{title_suffix}")
+
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
 
 # --- Chat Handling ---
 user_query = st.chat_input("Ask a question or start chatting:")
@@ -206,24 +162,44 @@ if user_query:
                 ("human", "{input}"),
             ])
 
-            # LCEL Chain using explicitly named chat_llm
             rag_chain = (
                 {"context": retriever | format_docs, "input": RunnablePassthrough()}
                 | prompt
                 | chat_llm
-                | StrOutputParser()
             )
-            response_text = rag_chain.invoke(user_query)
+            ai_message = rag_chain.invoke(user_query)
         else:
             history_messages = [("system", system_prompt)]
-            for msg in st.session_state.messages:
+            for msg in st.session_state.messages[:-1]:
                 role = "human" if msg["role"] == "user" else "ai"
                 history_messages.append((role, msg["content"]))
+            history_messages.append(("human", user_query))
 
             prompt = ChatPromptTemplate.from_messages(history_messages)
-            chat_chain = prompt | chat_llm | StrOutputParser()
-            response_text = chat_chain.invoke({})
+            chat_chain = prompt | chat_llm
+            ai_message = chat_chain.invoke({})
 
+        response_text = ai_message.content
         st.write(response_text)
 
+        # Robust extraction supporting standard LangChain and Ollama-native response metadata
+        response_meta = getattr(ai_message, "response_metadata", {})
+        usage_metadata = getattr(ai_message, "usage_metadata", {}) or response_meta.get("token_usage", {})
+
+        p_tokens = (
+            usage_metadata.get("prompt_tokens") 
+            or response_meta.get("prompt_eval_count") 
+            or 0
+        )
+        c_tokens = (
+            usage_metadata.get("completion_tokens") 
+            or response_meta.get("eval_count") 
+            or 0
+        )
+        
+        st.session_state.last_prompt_tokens = p_tokens
+        st.session_state.last_completion_tokens = c_tokens
+        st.session_state.total_tokens += (p_tokens + c_tokens)
+
     st.session_state.messages.append({"role": "assistant", "content": response_text})
+    st.rerun()
