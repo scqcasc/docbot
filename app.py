@@ -79,6 +79,11 @@ uploaded_file = st.sidebar.file_uploader("Upload a .txt, .md,  or .pdf file", ty
 
 if uploaded_file:
     # Save file temporarily
+
+    # make sure there is a tmp dir
+    if not os.path.isdir("./tmp"):
+        os.mkdir("./tmp")
+        
     file_path = os.path.join("./tmp", uploaded_file.name)
     with open(file_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
