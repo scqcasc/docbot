@@ -1,14 +1,21 @@
 import os
 import subprocess
 import json
+import requests
 import streamlit as st
 from langchain_community.vectorstores import FAISS
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
+
+# Optional import of ollama SDK
+try:
+    import ollama
+except ImportError:
+    ollama = None
 
 # --- Page Configuration (Must be the first Streamlit command) ---
 st.set_page_config(page_title="Local Chatbot", layout="wide")
@@ -42,7 +49,43 @@ def get_vram_usage():
         except Exception:
             return 0.0, 8.0 # Safe default fallback
 
+def get_installed_ollama_models():
+    """Fetches list of installed Ollama models, filtering out embed-only models."""
+    models = []
+    if ollama:
+        try:
+            response = ollama.list()
+            model_list = response.get("models", []) if isinstance(response, dict) else response.models
+            models = [m.get("name", "") if isinstance(m, dict) else m.model for m in model_list]
+        except Exception:
+            pass
+
+    if not models:
+        try:
+            res = requests.get("http://localhost:11434/api/tags", timeout=3)
+            if res.status_code == 200:
+                data = res.json()
+                models = [m["name"] for m in data.get("models", [])]
+        except Exception:
+            pass
+
+    # Filter out known embedding models from the LLM chat dropdown
+    chat_models = [m for m in models if "embed" not in m.lower()]
+    return chat_models if chat_models else ["llama3.2"]
+
 # --- Build the Streamlit Sidebar Widget ---
+st.sidebar.title("⚙️ LLM & System Settings")
+
+# LLM Selector Widget
+available_models = get_installed_ollama_models()
+selected_model = st.sidebar.selectbox(
+    "🤖 Select Installed LLM",
+    options=available_models,
+    index=0,
+    help="Select any Ollama chat model currently pulled on your system."
+)
+
+st.sidebar.markdown("---")
 st.sidebar.title("📊 AMD GPU Monitor")
 
 used_vram, total_vram = get_vram_usage()
@@ -79,9 +122,9 @@ else:
 
 # System prompt control widget
 system_prompt = st.sidebar.text_area(
-    label="⚙️ System Prompt",
+    label="💬 System Prompt",
     value=default_system_prompt,
-    height=180,
+    height=160,
     help=help_text
 )
 
@@ -94,7 +137,7 @@ if st.sidebar.button("🗑️ Clear Chat History"):
     st.rerun()
 
 # --- Main Interface ---
-title_suffix = " (Document RAG)" if uploaded_file else " (Open Chat)"
+title_suffix = f" ({selected_model} - RAG)" if uploaded_file else f" ({selected_model} - Open Chat)"
 st.title(f"🤖 Local Chatbot{title_suffix}")
 
 # Display chat message history on rerun
@@ -102,8 +145,9 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
 
-# Initialize Ollama local model and embeddings
-llm = ChatOllama(model="llama3.2")
+# Explicitly instantiate the Chat LLM and Embedding models separately
+chat_llm = ChatOllama(model=selected_model)
+embeddings_model = OllamaEmbeddings(model="nomic-embed-text")
 
 # --- RAG Branch: Process Document if Uploaded ---
 retriever = None
@@ -124,8 +168,7 @@ if uploaded_file:
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     splits = text_splitter.split_documents(docs)
 
-    embeddings = OllamaEmbeddings(model="nomic-embed-text")
-    vectorstore = FAISS.from_documents(splits, embeddings)
+    vectorstore = FAISS.from_documents(splits, embeddings_model)
     retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
     if os.path.exists(file_path):
@@ -135,14 +178,12 @@ if uploaded_file:
 user_query = st.chat_input("Ask a question or start chatting:")
 
 if user_query:
-    # Append user message to history and display
     st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
         st.write(user_query)
 
     with st.chat_message("assistant"):
         if retriever:
-            # RAG Mode Chain
             def format_docs(docs):
                 return "\n\n".join(doc.page_content for doc in docs)
 
@@ -151,25 +192,24 @@ if user_query:
                 ("human", "{input}"),
             ])
 
+            # LCEL Chain using explicitly named chat_llm
             rag_chain = (
                 {"context": retriever | format_docs, "input": RunnablePassthrough()}
                 | prompt
-                | llm
+                | chat_llm
                 | StrOutputParser()
             )
             response_text = rag_chain.invoke(user_query)
         else:
-            # Direct Open-Ended Chat Mode (Includes full conversation history)
             history_messages = [("system", system_prompt)]
             for msg in st.session_state.messages:
                 role = "human" if msg["role"] == "user" else "ai"
                 history_messages.append((role, msg["content"]))
 
             prompt = ChatPromptTemplate.from_messages(history_messages)
-            chat_chain = prompt | llm | StrOutputParser()
+            chat_chain = prompt | chat_llm | StrOutputParser()
             response_text = chat_chain.invoke({})
 
         st.write(response_text)
 
-    # Append assistant response to history
     st.session_state.messages.append({"role": "assistant", "content": response_text})
