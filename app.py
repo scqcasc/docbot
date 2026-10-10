@@ -153,35 +153,58 @@ if st.sidebar.button("🗑️ Clear Chat History"):
 chat_llm = ChatOllama(model=selected_model, num_ctx=8192)
 embeddings_model = OllamaEmbeddings(model="nomic-embed-text")
 
-retriever = None
+# Initialize vectorstore state if not present
+if "vectorstore" not in st.session_state:
+  st.session_state.vectorstore = None
+if "current_file_name" not in st.session_state:
+  st.session_state.current_file_name = None
+
+# Process new file uploads if a file is present in the uploader
 if uploaded_file:
+  if (
+      st.session_state.vectorstore is None
+      or st.session_state.current_file_name != uploaded_file.name
+  ):
     if not os.path.isdir("./tmp"):
-        os.mkdir("./tmp")
-        
+      os.mkdir("./tmp")
+
     file_path = os.path.join("./tmp", uploaded_file.name)
     with open(file_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+      f.write(uploaded_file.getbuffer())
 
     if uploaded_file.name.endswith(".pdf"):
-        loader = PyPDFLoader(file_path)
+      loader = PyPDFLoader(file_path)
     else:
-        loader = TextLoader(file_path)
-    
+      loader = TextLoader(file_path)
+
     docs = loader.load()
 
     if uploaded_file.name.endswith(".py"):
-        text_splitter = RecursiveCharacterTextSplitter.from_language(
-            language=Language.PYTHON, chunk_size=2000, chunk_overlap=200
-        )
+      text_splitter = RecursiveCharacterTextSplitter.from_language(
+          language=Language.PYTHON, chunk_size=2000, chunk_overlap=200
+      )
     else:
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
+      text_splitter = RecursiveCharacterTextSplitter(
+          chunk_size=2000, chunk_overlap=200
+      )
 
     splits = text_splitter.split_documents(docs)
-    vectorstore = FAISS.from_documents(splits, embeddings_model)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 8})
+
+    # CRITICAL FIX: Save directly into session state so it persists across reruns
+    st.session_state.vectorstore = FAISS.from_documents(
+        splits, embeddings_model
+    )
+    st.session_state.current_file_name = uploaded_file.name
 
     if os.path.exists(file_path):
-        os.remove(file_path)
+      os.remove(file_path)
+
+# Build the retriever safely from session state
+retriever = None
+if st.session_state.vectorstore is not None:
+  retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 8})
+  # if os.path.exists(file_path):
+  #       os.remove(file_path)
 
 # --- Main Interface ---
 title_suffix = f" ({selected_model} - RAG)" if uploaded_file else f" ({selected_model} - Open Chat)"
@@ -225,7 +248,7 @@ if user_query:
 
             rag_chain = (
                 {
-                    "context": retriever | format_docs,
+                    "context": lambda x: format_docs(retriever.invoke(x["input"])),
                     "chat_history": lambda x: x["chat_history"],
                     "input": lambda x: x["input"]
                 }
