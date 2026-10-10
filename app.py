@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import json
 import requests
@@ -24,6 +25,51 @@ if "last_prompt_tokens" not in st.session_state:
     st.session_state.last_prompt_tokens = 0
 if "last_completion_tokens" not in st.session_state:
     st.session_state.last_completion_tokens = 0
+
+def render_message_with_code_downloads(content, message_idx=0):
+  """Parses a message for markdown code blocks and adds download buttons."""
+  # Split the text by markdown code blocks, keeping the blocks in the list
+  parts = re.split(r"(```[\s\S]*?```)", content)
+
+  for i, part in enumerate(parts):
+    if part.startswith("```") and part.endswith("```"):
+      # Extract language and code lines
+      lines = part.strip().split("\n")
+      first_line = lines[0][3:].strip()
+      language = first_line if first_line else "python"
+      code_content = "\n".join(lines[1:-1])
+
+      # Render the code block
+      st.code(code_content, language=language)
+
+      # Map language to standard file extensions
+      ext_map = {
+          "python": "py",
+          "py": "py",
+          "javascript": "js",
+          "js": "js",
+          "html": "html",
+          "css": "css",
+          "json": "json",
+          "sh": "sh",
+          "bash": "sh",
+          "sql": "sql",
+      }
+      ext = ext_map.get(language.lower(), "txt")
+
+      # Unique key required for Streamlit widgets inside loops
+      unique_key = f"dl_msg_{message_idx}_code_{i}"
+
+      st.download_button(
+          label=f"📥 Download {language.capitalize()} Script",
+          data=code_content,
+          file_name=f"generated_script.{ext}",
+          mime="text/plain",
+          key=unique_key,
+      )
+    else:
+      if part.strip():
+        st.write(part)
 
 def get_vram_usage():
     try:
@@ -141,9 +187,12 @@ if uploaded_file:
 title_suffix = f" ({selected_model} - RAG)" if uploaded_file else f" ({selected_model} - Open Chat)"
 st.title(f"🤖 Local Chatbot{title_suffix}")
 
-for message in st.session_state.messages:
+for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
-        st.write(message["content"])
+        if message["role"] == "assistant":
+          render_message_with_code_downloads(message["content"], message_idx=idx)
+        else:
+          st.write(message["content"])
 
 # --- Chat Handling ---
 user_query = st.chat_input("Ask a question or start chatting:")
@@ -195,7 +244,9 @@ if user_query:
             })
 
         response_text = ai_message.content
-        st.write(response_text)
+        render_message_with_code_downloads(
+            response_text, message_idx=len(st.session_state.messages)
+        )
 
         # Robust extraction supporting standard LangChain and Ollama-native response metadata
         response_meta = getattr(ai_message, "response_metadata", {})
