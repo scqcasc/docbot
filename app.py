@@ -4,7 +4,8 @@ import json
 import requests
 import streamlit as st
 from langchain_community.vectorstores import FAISS
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_ollama import ChatOllama, OllamaEmbeddings
@@ -153,31 +154,45 @@ if user_query:
         st.write(user_query)
 
     with st.chat_message("assistant"):
+        # 1. Build chat history message objects for LangChain
+        chat_history_msgs = []
+        # Exclude the current user query since it goes into the 'input' variable
+        for msg in st.session_state.messages[:-1]:
+            if msg["role"] == "user":
+                chat_history_msgs.append(HumanMessage(content=msg["content"]))
+            else:
+                chat_history_msgs.append(AIMessage(content=msg["content"]))
+
+        # 2. Define standard prompt layout with MessagesPlaceholder
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{input}"),
+        ])
+
         if retriever:
             def format_docs(docs):
                 return "\n\n".join(doc.page_content for doc in docs)
 
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", system_prompt),
-                ("human", "{input}"),
-            ])
-
             rag_chain = (
-                {"context": retriever | format_docs, "input": RunnablePassthrough()}
+                {
+                    "context": retriever | format_docs,
+                    "chat_history": lambda x: x["chat_history"],
+                    "input": lambda x: x["input"]
+                }
                 | prompt
                 | chat_llm
             )
-            ai_message = rag_chain.invoke(user_query)
+            ai_message = rag_chain.invoke({
+                "chat_history": chat_history_msgs,
+                "input": user_query
+            })
         else:
-            history_messages = [("system", system_prompt)]
-            for msg in st.session_state.messages[:-1]:
-                role = "human" if msg["role"] == "user" else "ai"
-                history_messages.append((role, msg["content"]))
-            history_messages.append(("human", user_query))
-
-            prompt = ChatPromptTemplate.from_messages(history_messages)
             chat_chain = prompt | chat_llm
-            ai_message = chat_chain.invoke({})
+            ai_message = chat_chain.invoke({
+                "chat_history": chat_history_msgs,
+                "input": user_query
+            })
 
         response_text = ai_message.content
         st.write(response_text)
